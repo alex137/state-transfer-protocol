@@ -1,8 +1,8 @@
 # State Transfer Protocol (STP)
 
-**State Transfer Protocol (STP)** is a tiny HTTP convention for streaming and synchronizing changing state as an append-only change log — with **gap recovery**, **idempotency**, and **auditable ordering** via a monotonic sequence number.
+**State Transfer Protocol (STP)** is a tiny HTTP convention for synchronizing changing **state** as an append-only change log — with **gap recovery**, **idempotency**, and **auditable ordering** via a monotonic sequence number.
 
-It is designed to replace bespoke “poll JSON until it changes” patterns with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about.
+It is designed to replace bespoke “poll JSON until it changes” patterns with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about — especially across **independent systems** that do not share infrastructure.
 
 ---
 
@@ -32,29 +32,63 @@ Row format:
 
 ---
 
-## Why STP (vs JSON polling)
+## Why STP exists
 
-**JSON polling is expensive and ambiguous:**
-- forces full-state downloads or ad‑hoc “since” logic
-- hard to audit (no canonical ordering)
-- easy to lose updates during outages
-- encourages per-API bespoke schemas and libraries
+Many systems need to share or synchronize **state changes** (tables, mappings, approval lists, subscriptions, routing entries, etc.) without:
 
-**STP is minimal but complete:**
-- **Incremental replication:** `since_id=N` yields only new rows
-- **Auditable change log:** monotonic `SeqNo` provides integrity and replay
-- **Gap recovery:** reconnect with last seen `SeqNo`
-- **Idempotent by design:** duplicates are harmless
-- **Composable:** works with long-poll, caches, CDNs, or any transport layer
-- **Easy to implement:** can be served by any web server + datastore
+- building a bespoke “delta sync” API for every endpoint,
+- transferring the full dataset repeatedly,
+- relying on a shared broker or database,
+- losing updates during outages,
+- or sacrificing auditability.
+
+STP defines a simple, inspectable, cacheable convention for doing this over HTTP.
 
 ---
 
-## STP is not a message bus
+## Why STP (vs JSON polling)
 
-STP is not Kafka, NATS, or a pub/sub system.  
-It is a minimal convention for exposing **change streams over HTTP**, with durable ordering and gap recovery.  
-It composes with any distribution layer (CDN, long‑poll, notify POST, queues).
+**JSON polling is expensive and ambiguous:**
+- forces full-state downloads or ad-hoc “since” logic
+- hard to audit (no canonical ordering)
+- easy to lose updates during outages
+- encourages one-off schemas and libraries
+
+**STP is minimal but complete:**
+- **Incremental replication:** `since_id=N` yields only new rows
+- **Auditable ordering:** monotonic `SeqNo` provides integrity and replay
+- **Gap recovery:** reconnect with last seen `SeqNo`
+- **Idempotent by design:** duplicates are harmless
+- **Composable:** works with long-poll, caches, CDNs, or any transport layer
+- **Easy to implement:** any web server + datastore can serve STP tables
+
+---
+
+## STP vs Kafka (and other message buses)
+
+Kafka, NATS, and similar systems are excellent for **high-throughput event streaming** inside a single organization or tightly coordinated environment. If you can run a broker cluster, they provide durability, ordering guarantees, and rich tooling.
+
+STP solves a different problem: **auditable incremental state transfer across independent systems using only HTTP**. It is designed for environments where participants:
+
+- do **not** share infrastructure,
+- cannot assume a common broker,
+- need **pull-based replay** (`since_id`) and idempotency,
+- want a protocol that works over the public internet with minimal dependencies.
+
+**In practice:** Kafka is a platform; STP is a protocol primitive.  
+You can use Kafka internally and expose STP externally, or export Kafka topics into STP tables.
+
+---
+
+## STP is not a pub/sub system
+
+STP does not provide topic routing, fanout, consumer groups, or broker coordination.
+
+It provides a **durable change stream format** and a **sync primitive** that composes with:
+- CDNs and HTTP caches
+- long-poll / streaming responses
+- notify POSTs
+- queues or brokers (optional)
 
 ---
 
@@ -68,7 +102,7 @@ GET <table_url>?since_id=N
 
 Responses return TSV rows with:
 - strictly increasing `SeqNo` per stream
-- optional long‑poll/streaming until timeout or idle
+- optional long-poll / streaming until timeout or idle
 
 **Required response header:**
 
@@ -83,7 +117,7 @@ Content-Type: application/stp+tsv; schema=<schema_id>; version=<n>
 
 If absent, treat as `since_id=0`.
 
-### Long‑poll / streaming (recommended)
+### Long-poll / streaming (recommended)
 
 Servers SHOULD stream rows until timeout (or idle), then close; clients reconnect using last seen `SeqNo`.
 
