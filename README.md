@@ -1,92 +1,97 @@
-# STP — State Transfer Protocol
+# State Transfer Protocol (STP)
 
-> **STP (State Transfer Protocol)** is a tiny, web‑native way to replicate *changing state* across systems — fast, auditable, and implementation‑friendly.
+**State Transfer Protocol (STP)** is a tiny HTTP convention for streaming and synchronizing changing state as an append-only change log — with **gap recovery**, **idempotency**, and **auditable ordering** via a monotonic sequence number.
 
-Most integrations fall into one of two bad choices:
-
-1. **Poll JSON endpoints** and re-download full objects (wasteful, inconsistent, hard to audit), or  
-2. **Build custom event streams** (complex, brittle, and hard to standardize across orgs).
-
-STP is the missing primitive: **a simple, ordered change log for a “table” of keyed records**, delivered over plain HTTPS, with a standard delta query (`since_id=`) and an optional notification hook.
+It is designed to replace bespoke “poll JSON until it changes” patterns with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about.
 
 ---
 
-## The idea in one sentence
+## Quick example (wire format)
 
-**Expose your system’s state as an append‑only, monotonically‑ordered change stream, so others can maintain an identical copy without re-fetching everything.**
+```http
+GET /table?since_id=42
+Accept: application/stp+tsv; schema=endpoint_manifest; version=1
+```
 
-- **“Table”** just means a set of **primary keys → records**.  
-- The **sequence** is how you get integrity, replay, and auditability.
+```text
+Content-Type: application/stp+tsv; schema=endpoint_manifest; version=1
 
----
+43\t2026-01-08T00:00:00Z\t+\tfhir_read\thttps://prov.com/fhir/read
+44\t2026-01-08T00:00:01Z\t+\tdirect_message\thttps://prov.com/direct
+```
 
-## Why STP (vs JSON polling)
-
-### JSON polling is deceptively expensive
-- You repeatedly fetch whole objects even when only a few fields changed.
-- You need ad‑hoc paging, caching, and retry logic.
-- You lose a reliable audit trail (what changed *when*).
-- Providers often “drop” old events; consumers can’t prove completeness.
-
-### STP gives you a standard answer
-- **Deltas are first‑class** (`since_id=`).
-- **Ordering is explicit** (monotonic `SeqNo`).
-- **Replay is natural** (start at `since_id=0`).
-- **Streaming is easy** (long‑poll GET).
-- **Auditing is built in** (append‑only, ordered rows).
-
----
-
-## Core model
-
-An STP “table” is a stream of TSV rows:
+Row format:
 
 ```
 [SeqNo] \t [RFC3339 UTC Timestamp] \t [+/-] \t [Primary Key] \t [Record]
 ```
 
-- `SeqNo` is **monotonic per table** and is the authoritative ordering.
-- `+` means *add/replace* a primary key.
-- `-` means *delete* a primary key.
-- Clients **MUST tolerate duplicate rows** (same `SeqNo`) and apply changes idempotently.
+- `SeqNo` is the authoritative ordering (timestamps are informational)
+- `+` add/replace, `-` delete
+- Clients MUST tolerate duplicates and process rows idempotently
 
-**Content-Type**
+---
 
-Servers SHOULD set:
+## Why STP (vs JSON polling)
+
+**JSON polling is expensive and ambiguous:**
+- forces full-state downloads or ad‑hoc “since” logic
+- hard to audit (no canonical ordering)
+- easy to lose updates during outages
+- encourages per-API bespoke schemas and libraries
+
+**STP is minimal but complete:**
+- **Incremental replication:** `since_id=N` yields only new rows
+- **Auditable change log:** monotonic `SeqNo` provides integrity and replay
+- **Gap recovery:** reconnect with last seen `SeqNo`
+- **Idempotent by design:** duplicates are harmless
+- **Composable:** works with long-poll, caches, CDNs, or any transport layer
+- **Easy to implement:** can be served by any web server + datastore
+
+---
+
+## STP is not a message bus
+
+STP is not Kafka, NATS, or a pub/sub system.  
+It is a minimal convention for exposing **change streams over HTTP**, with durable ordering and gap recovery.  
+It composes with any distribution layer (CDN, long‑poll, notify POST, queues).
+
+---
+
+## Specification (at a glance)
+
+### GET (stream rows)
+
+```
+GET <table_url>?since_id=N
+```
+
+Responses return TSV rows with:
+- strictly increasing `SeqNo` per stream
+- optional long‑poll/streaming until timeout or idle
+
+**Required response header:**
 
 ```
 Content-Type: application/stp+tsv; schema=<schema_id>; version=<n>
 ```
 
-This makes tables self-describing (a core advantage over ad‑hoc JSON).
-
----
-
-## Delta sync
+### Delta sync
 
 - `?since_id=N` → rows with `SeqNo > N`
-- `?since_id=-N` → last `N` rows
-- If absent, treat as `since_id=0`.
+- `?since_id=-N` → last `N` rows (tail)
 
----
+If absent, treat as `since_id=0`.
 
-## Long-poll (recommended)
+### Long‑poll / streaming (recommended)
 
-Servers SHOULD hold a GET connection open and stream new rows until:
-- timeout, or
-- the server becomes idle / expects no near-term updates,
+Servers SHOULD stream rows until timeout (or idle), then close; clients reconnect using last seen `SeqNo`.
 
-then close. Clients reconnect using the last seen `SeqNo`.
+### Notify (optional mechanism)
 
----
-
-## Notify (optional mechanism)
-
-Participants MAY expose a **notify URL** that peers can POST to in order to:
+Participants MAY expose **notify URLs** that peers can POST to in order to:
 - announce a **new table** the recipient should begin monitoring, or
-- signal that a table **has new rows**.
-
-POST format:
+- signal that an existing table **has new rows**
 
 ```
 POST <notify_url>
@@ -95,48 +100,27 @@ Content-Type: application/x-www-form-urlencoded
 table=<STP_Table_URL>
 ```
 
-Recipients track last processed `SeqNo` and GET with `since_id` to retrieve new rows and recover gaps.
-
 Notify POSTs may be sent repeatedly and must be treated as idempotent.
 
 ---
 
-## Minimal example
+## Docs
 
-1) Client begins sync:
-
-```
-GET https://example.com/table?since_id=0
-```
-
-2) Server returns:
-
-```
-1    2026-01-08T10:00:00Z    +    alice    {"status":"ok"}
-2    2026-01-08T10:02:00Z    +    bob      {"status":"warn"}
-3    2026-01-08T10:03:00Z    -    bob
-```
-
-3) Client persists `SeqNo=3` and later resumes:
-
-```
-GET https://example.com/table?since_id=3
-```
+- **Implementer Quickstart:** `docs/quickstart.md`
+- **STP Core Spec:** `docs/spec.md`
+- **Schemas:** `schemas/`
 
 ---
 
-## Reference implementation draft
+## Contributing
 
-This repo contains:
-- A concise spec (`spec/`)
-- Examples (`examples/`)
-- Test vectors (`test-vectors/`)
-- A lightweight reference parser (`lib/`)
+PRs welcome. Suggested areas:
+- reference implementations (Go, Python, JS)
+- schema registry conventions
+- test vectors + interop harness
 
 ---
 
-## Status
+## License
 
-**Draft v0.x** — the goal is to keep STP extremely small, boring, and implementable.
-
-PRs welcome: clarity > features.
+MIT (see `LICENSE`).
