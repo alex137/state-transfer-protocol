@@ -1,55 +1,59 @@
 # STP Implementer Quickstart
 
-This guide shows the minimal pieces required to serve and follow STP streams.
+## 1) Serve a SURL (State URL)
 
-## 1) Serve a State URL (SURL)
+Expose an HTTP GET endpoint that returns TSV rows:
 
-Expose a table as an append-only TSV change log.
-
-```http
-GET /my_table?since_id=0
-Accept: text/sequence; charset=utf-8; schema=my_schema; version=1
+```
+[SeqNo] \t [RFC3339 UTC Timestamp] \t [+/-] \t [Primary Key] \t [Record]
 ```
 
-Response:
+Include:
 
-```text
-Content-Type: text/sequence; charset=utf-8; schema=my_schema; version=1
-
-1\t2026-01-01T00:00:00Z\t+\tkey1\tvalue1
-2\t2026-01-01T00:00:01Z\t+\tkey2\tvalue2
+```
+Content-Type: text/sequence; charset=utf-8; schema=<schema_id>; version=<n>
 ```
 
-Clients track the last processed `SeqNo` and reconnect with `since_id=<last_seqno>`.
+Support:
 
-## 2) Follow a SURL (client)
+- `?since_id=N` (delta sync)
+- optional long-poll (stream until idle / timeout)
 
-1. Initialize `last_seqno = 0`
-2. `GET <surl>?since_id=last_seqno`
-3. Apply each row in order (idempotently)
-4. Update `last_seqno` as you process rows
-5. Repeat (or hold open as a long-poll stream)
+## 2) Follow a SURL
 
-Clients MUST tolerate duplicate rows and process them idempotently.
+Clients store the last processed `SeqNo` and reconnect with:
 
-## 3) Notify (optional but recommended)
+```
+GET <surl>?since_id=<last_seqno>
+```
 
-Peers may expose **Notify URLs (NURLs)**.  
-Notify is **advisory**: recipients MUST GET the SURL as the authoritative source of state.
+Clients MUST tolerate duplicate rows (same `SeqNo`) and process idempotently.
 
-```http
+## 3) Use NURLs (Notify URLs)
+
+Implement a POST endpoint that accepts:
+
+```
 POST <nurl>
 Content-Type: application/x-www-form-urlencoded
-
-surl=https://example.com/my_table&manifest_notify=https://example.com/notify
 ```
 
-- `surl` tells the recipient what to follow.
-- Additional keys advertise callback NURLs for specific event types.
+Notify bodies may contain:
 
-## 4) Common patterns
+### A) State notification (recommended)
 
-- **Bootstrap:** `surl=<table>&notify=<callback>`
-- **Fan-out:** advertise a SURL and request callback if the peer follows it
-- **Subscription:** publish a SURL and notify a subscriber NURL when new rows exist
-- **Changefeed graphs:** tables point to other tables; notify helps propagate updates quickly
+```
+surl=<SURL>&match=<NURL>&...
+```
+
+Meaning: “GET this SURL; also, here is how to notify me back.”
+
+### B) Handshake / callback-only advertisement
+
+```
+manifest_nurl=<NURL>
+```
+
+Meaning: “Here is a callback NURL you can use; I’m not pointing to state yet.”
+
+Notify is advisory: state is authoritative at SURLs.

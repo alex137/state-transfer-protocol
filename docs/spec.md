@@ -2,18 +2,16 @@
 
 ## 1. Overview
 
-STP (State Transfer Protocol) is an HTTP-based protocol for streaming ordered rows representing changes to a table.
+STP (State Transfer Protocol) is an HTTP-based protocol for streaming ordered rows
+representing changes to a table. STP is designed for control-plane coordination,
+routing, and durable changefeeds.
 
-An STP server exposes a table via HTTP GET. Clients poll or stream the table using `since_id` and apply each row in `SeqNo` order.
+An STP server exposes a table via HTTP GET. Clients poll or stream the table using
+`since_id` and apply each row in `SeqNo` order.
 
-STP is designed for control-plane coordination, routing, durable changefeeds, and cross-organization state synchronization.
-
-### Terminology
-
-- **SURL (State URL):** an STP table URL that serves rows via HTTP GET.
-- **NURL (Notify URL):** an HTTP endpoint that accepts STP Notify POSTs.
-
----
+Terminology:
+- **SURL** (State URL): an HTTP URL that serves STP rows via GET.
+- **NURL** (Notify URL): an HTTP URL that accepts STP Notify POSTs.
 
 ## 2. Row Format
 
@@ -31,12 +29,10 @@ SeqNo \t Timestamp \t Action \t PrimaryKey \t Record
 - **PrimaryKey**: the key the action applies to
 - **Record**: free-form schema-defined string (may contain spaces; SHOULD avoid tabs)
 
-### 2.2 Ordering + idempotency
+### 2.2 Ordering
 
-- Servers SHOULD return rows in **strictly increasing SeqNo order** for any response.
-- Clients MUST handle duplicate rows (same SeqNo) idempotently.
-
----
+Servers SHOULD return rows in **strictly increasing SeqNo order** for any response.
+Clients MUST handle duplicate rows (same SeqNo) idempotently.
 
 ## 3. Content-Type
 
@@ -52,14 +48,12 @@ Servers MAY also include:
 STP-Last-SeqNo: <n>
 ```
 
----
-
 ## 4. GET Semantics
 
 ### 4.1 Delta sync
 
-- `since_id=N` returns rows with `SeqNo > N`
-- `since_id=-N` returns the last `N` rows
+- `since_id=N` returns rows with SeqNo > N
+- `since_id=-N` returns the last N rows
 - if absent, treat as `since_id=0`
 
 ### 4.2 Long-poll (streaming)
@@ -67,52 +61,51 @@ STP-Last-SeqNo: <n>
 Servers SHOULD stream rows until timeout or idle, then close.  
 Clients reconnect using last processed SeqNo.
 
----
+## 5. Notify (NURLs)
 
-## 5. Notify
+Participants MAY expose Notify URLs (**NURLs**) that accept HTTP POSTs with
+`Content-Type: application/x-www-form-urlencoded`.
 
-STP includes a simple mechanism for announcing new or updated state streams.
+Notify POSTs are advisory. They communicate:
 
-Participants MAY expose **Notify URLs (NURLs)** that peers can POST to in order to announce a new or updated **State URL (SURL)**.
+- an optional **State URL (SURL)** that may have new state, and/or  
+- one or more **NURLs** the sender wishes to advertise for callbacks.
 
-### 5.1 Request
+### 5.1 Notify Body Format
 
+The POST body is a form-encoded set of key/value pairs:
+
+- `surl` is a **reserved parameter name**
+- all other parameters represent advertised NURLs
+
+Rules:
+
+- `surl` MAY be present. If present, it MUST appear exactly once and MUST be a valid STP SURL.
+- If `surl` is absent, the Notify POST is treated as **NURL advertisement / handshake** only.
+- All other parameters MUST have values that are valid Notify URLs (NURLs).
+- Unknown parameter names MUST be ignored.
+- Notify POSTs MAY repeat and MUST be treated as idempotent.
+- Recipients MUST GET `surl` (when provided) as the authoritative source of state.
+
+Examples:
+
+**State notification with callback:**
 ```
-POST <nurl>
-Content-Type: application/x-www-form-urlencoded
-
-surl=<STP_State_URL>&<event_type>=<NURL>&...
-```
-
-- `surl` MUST be present exactly once and MUST be a valid STP State URL.
-- Additional parameters MAY be included to advertise event-specific callback NURLs.
-  - Each key is an `event_type` token matching: `[a-z][a-z0-9_]*`
-  - Each value MUST be a NURL.
-- Unknown parameters MUST be ignored.
-- Notify POSTs are advisory and idempotent; recipients MUST GET `surl` as the authoritative source of state.
-
-### 5.2 Examples
-
-**Minimal notify:**
-
-```
-surl=https://example.com/table
-```
-
-**Notify + callback surfaces:**
-
-```
-surl=https://example.com/table&manifest_notify=https://example.com/notify&grant_notify=https://example.com/grant_notify
+surl=https://example.com/state&match=https://example.com/match_nurl
 ```
 
----
+**Handshake (callback advertisement only):**
+```
+manifest_nurl=https://example.com/manifest_nurl
+```
 
 ## 6. Deletion + Auditability
 
 STP is compatible with full audit logs:
 
-- Servers SHOULD retain historical SeqNo rows for replay.
-- Clients MAY request `since_id=-N` for tailing.
-- Implementations that compact history SHOULD document retention policy.
+- Servers SHOULD retain historical SeqNo rows for replay
+- Clients MAY request `since_id=-N` for tailing
+- Implementations that compact history SHOULD document retention policy
 
-Optional parameters like `view=active` (omitting keys whose latest row is `-`) are allowed by schema conventions but are not required by STP core.
+(If desired, future versions may add optional parameters for requesting compaction
+views.)

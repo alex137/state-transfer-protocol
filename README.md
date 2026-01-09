@@ -2,9 +2,8 @@
 
 **State Transfer Protocol (STP)** is a tiny HTTP convention for synchronizing changing **state** as an append-only change log — with **gap recovery**, **idempotency**, and **auditable ordering** via a monotonic sequence number.
 
-STP is to state synchronization what HTTP is to hypertext: a simple, universal substrate for **linking and transferring state** across independent systems.
-
-It is designed to replace bespoke “poll JSON until it changes” patterns and ad‑hoc webhooks with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about — especially when participants do **not** share infrastructure.
+STP is to state synchronization what HTTP is to hypertext: a simple, universal substrate for linking and transferring state.  
+It is designed to replace bespoke “poll JSON until it changes” patterns with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about — especially across **independent systems** that do not share infrastructure.
 
 ---
 
@@ -12,7 +11,7 @@ It is designed to replace bespoke “poll JSON until it changes” patterns and 
 
 ```http
 GET /table?since_id=42
-Accept: text/sequence; charset=utf-8; schema=endpoint_manifest; version=1
+Accept: text/sequence; schema=endpoint_manifest; version=1
 ```
 
 ```text
@@ -47,7 +46,6 @@ Many systems need to share or synchronize **changing state** (tables, mappings, 
 **STP defines a tiny, inspectable, cacheable convention for doing this over HTTP.**
 
 It represents state as an **append-only change log** with monotonic sequence numbers, enabling:
-
 - **delta sync** (`since_id`)
 - **gap recovery** (replay from last seen SeqNo)
 - **idempotent processing**
@@ -55,57 +53,49 @@ It represents state as an **append-only change log** with monotonic sequence num
 
 ---
 
-## STP vs JSON polling, webhooks, and Kafka
+## Why STP includes Notify (NURLs)
 
-These patterns exist because **HTTP has no built‑in state‑notify primitive** — so systems invented their own.
+In real systems, “poll until it changes” isn’t enough.  
+You also need a way to **bootstrap relationships** and **signal updates** across distributed components.
 
-### JSON polling
-- often forces full-state downloads or bespoke “since” APIs
-- expensive and ambiguous
-- easy to lose updates during outages
-- hard to audit (no canonical ordering)
+Historically, webhooks and JSON polling exist largely because HTTP itself has no built‑in “notify” primitive.  
+STP fills that missing gap by treating **events as advisory notifications about state change**, and making **state streams the authoritative source of truth**.
 
-### Webhooks
-- “event-only” notifications without a durable authoritative log
-- brittle under retries, failures, and race conditions
-- requires bespoke signing, replay protection, and idempotency logic
+STP therefore includes a simple **Notify mechanism**, where a peer can POST:
 
-### Kafka / message buses
-- great for high-throughput streams inside one organization
-- assumes shared broker infrastructure and coordinated ops
-- not designed as a universal cross-org protocol
-
-**STP provides a better common primitive:** durable state streams + lightweight advisory notifications, all over HTTP.
-
----
-
-## STP includes Notify: SURLs + NURLs
-
-STP defines two concepts:
-
-- **SURL (State URL):** a URL that serves STP rows via HTTP GET.
-- **NURL (Notify URL):** an HTTP endpoint that accepts STP Notify POSTs.
-
-In real systems, polling alone isn’t enough. You also need a way to:
-
-- bootstrap relationships (“follow this table”),
-- signal updates (“something changed; re-GET”),
-- and advertise callback endpoints for later use.
-
-STP therefore includes a simple **Notify mechanism**: peers POST a `surl=...` and may include one or more event-specific callback NURLs.
+- an optional **State URL (SURL)** you should follow, and/or
+- one or more **Notify URLs (NURLs)** you can call back later (often with different roles / event types).
 
 This pattern appears everywhere:
 
-- **bootstrap:** “follow this SURL, and here’s how to notify me back”
-- **fan-out:** “here’s my table; notify me if you decide to follow it”
-- **subscriptions:** “notify this endpoint when you publish new rows”
-- **relationship establishment:** manifests, trust negotiation, capability discovery
-- **changefeed graphs:** tables pointing to tables, forming distributed routing networks
+- **bootstrap:** “here’s how to notify me back” (handshake)
+- **fan-out:** “follow this SURL; notify me if you decide to follow it”
+- **subscriptions:** “notify this NURL when you publish new rows”
+- **relationship establishment:** manifest exchange, trust negotiation, capability discovery
+- **changefeed graphs:** tables that point to other tables, forming distributed routing networks
 
-Because Notify supports **multiple event keys**, systems can expose distinct callback surfaces (e.g. `manifest_notify=`, `grant_notify=`) without inventing new protocols.
+Because STP supports **multiple NURLs**, participants can expose different callback surfaces for different event types (e.g., `match=`, `manifest_nurl=`, `grant=`) without inventing new protocols.
 
-**Result:** large distributed systems can be built from simple HTTP primitives:
+**Result:** large distributed systems can be built from simple HTTP primitives:  
 durable state streams (**SURLs**) + lightweight notification surfaces (**NURLs**).
+
+---
+
+## STP vs JSON polling, webhooks, and Kafka (one block)
+
+**JSON polling** repeatedly re-fetches large objects and tends to reinvent ad-hoc “since” logic.  
+**Webhooks** fire events but often lack replay/gap recovery, so receivers must build deduplication + backfill anyway.  
+**Kafka / message buses** provide excellent high-throughput event streaming inside a single organization, but require shared broker infrastructure and coordinated operations.
+
+**STP** is a minimal protocol primitive for **auditable incremental state transfer over HTTP across independent systems**:
+
+- Pull-based replay (`since_id`) and gap recovery
+- Idempotent by design (duplicates OK)
+- Cacheable, inspectable, CDN-friendly
+- No shared infrastructure required
+- Works on the public internet
+
+In practice: you can use Kafka internally and expose STP externally, or export Kafka topics into STP tables.
 
 ---
 
@@ -118,7 +108,7 @@ GET <surl>?since_id=N
 ```
 
 Responses return TSV rows with:
-- strictly increasing `SeqNo` per response
+- strictly increasing `SeqNo` per stream
 - optional long-poll / streaming until timeout or idle
 
 **Required response header:**
@@ -134,27 +124,27 @@ Content-Type: text/sequence; charset=utf-8; schema=<schema_id>; version=<n>
 
 If absent, treat as `since_id=0`.
 
-### Long‑poll / streaming (recommended)
+### Long-poll / streaming (recommended)
 
 Servers SHOULD stream rows until timeout (or idle), then close; clients reconnect using last seen `SeqNo`.
 
-### Notify
+### Notify (optional mechanism)
 
-Participants MAY expose **Notify URLs (NURLs)** that peers can POST to announce a new or updated **State URL (SURL)**.
+Participants MAY expose **Notify URLs (NURLs)** that peers can POST to in order to:
+- announce a **new or updated State URL (SURL)** the recipient should GET, and/or
+- advertise callback **NURLs** for event-specific notifications or handshakes.
 
 ```http
 POST <nurl>
 Content-Type: application/x-www-form-urlencoded
 
-surl=<STP_State_URL>&<event_type>=<NURL>&...
+surl=<SURL>&<event_type>=<NURL>&...
 ```
 
-- `surl` MUST be present exactly once and MUST be a valid STP State URL.
-- Additional parameters MAY advertise event-specific callback NURLs.
-  - Each key is an `event_type` token matching: `[a-z][a-z0-9_]*`
-  - Each value MUST be a NURL.
+- `surl` is optional. If present, it MUST appear exactly once and MUST be a valid STP SURL.
+- Additional parameters MAY be included to advertise event-specific NURLs.
 - Unknown parameters MUST be ignored.
-- Notify POSTs are advisory and idempotent; recipients MUST GET `surl` as the authoritative source of state.
+- Notify POSTs are advisory and idempotent; recipients MUST GET `surl` as the authoritative source of state (when provided).
 
 ---
 
