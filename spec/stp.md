@@ -59,19 +59,27 @@ Clients reconnect using last processed SeqNo.
 
 ## 5. Notify
 
-Participants MAY expose notify URLs that accept:
+## Notify
 
-```
-POST <notify_url>
-Content-Type: application/x-www-form-urlencoded
+Participants MAY expose **Notify URLs (NURLs)** that peers can POST to in order to announce
+a new **State URL (SURL)** the recipient should begin monitoring, or signal that an
+existing SURL may have new rows.
 
-table=<STP_Table_URL>
-```
+### POST format
 
-`table` MUST be a valid STP table URL.
+`Content-Type: application/x-www-form-urlencoded`
 
-Recipients track last processed SeqNo and GET with `since_id` as needed to retrieve
-new rows and recover gaps. Notify POSTs may repeat and must be treated as idempotent.
+Body MUST include:
+- `surl=<SURL>`
+
+Body MAY include:
+- `nurl=<NURL>`
+
+`surl` MUST be a valid STP State URL (SURL).  
+`nurl` (if present) MUST be a valid STP Notify URL (NURL).
+
+Notify POSTs are advisory and idempotent: recipients MAY retry them, and recipients MUST use
+GET on the referenced SURL to retrieve authoritative rows and recover gaps.
 
 ## 6. Deletion + Auditability
 
