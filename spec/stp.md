@@ -59,27 +59,21 @@ Clients reconnect using last processed SeqNo.
 
 ## 5. Notify
 
-## Notify
+### Notify (optional mechanism)
 
-Participants MAY expose **Notify URLs (NURLs)** that peers can POST to in order to announce
-a new **State URL (SURL)** the recipient should begin monitoring, or signal that an
-existing SURL may have new rows.
+Participants MAY expose Notify URLs (NURLs) that peers can POST to in order to announce a new or updated State URL (SURL).
 
-### POST format
+POST <notify_url>
+Content-Type: application/x-www-form-urlencoded
 
-`Content-Type: application/x-www-form-urlencoded`
+surl=<STP_State_URL>&<event_type>=&…
 
-Body MUST include:
-- `surl=<SURL>`
-
-Body MAY include:
-- `nurl=<NURL>`
-
-`surl` MUST be a valid STP State URL (SURL).  
-`nurl` (if present) MUST be a valid STP Notify URL (NURL).
-
-Notify POSTs are advisory and idempotent: recipients MAY retry them, and recipients MUST use
-GET on the referenced SURL to retrieve authoritative rows and recover gaps.
+- `surl` MUST be present exactly once and MUST be a valid STP State URL.
+- Additional parameters MAY be included to advertise notify endpoints for event-specific callbacks.
+  - Each key is an `event_type` token matching: `[A-Z][a-z0-9_]`
+  - Each value MUST be a NURL.
+- Unknown parameters MUST be ignored.
+- Notify POSTs are advisory and idempotent; recipients MUST GET `surl` as the authoritative source of state.
 
 ## 6. Deletion + Auditability
 

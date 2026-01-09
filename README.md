@@ -2,7 +2,9 @@
 
 **State Transfer Protocol (STP)** is a tiny HTTP convention for synchronizing changing **state** as an append-only change log — with **gap recovery**, **idempotency**, and **auditable ordering** via a monotonic sequence number.
 
-It is designed to replace bespoke “poll JSON until it changes” patterns with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about — especially across **independent systems** that do not share infrastructure.
+STP is to state synchronization what HTTP is to hypertext: a simple, universal substrate for **linking and transferring state** across independent systems.
+
+It is designed to replace bespoke “poll JSON until it changes” patterns and ad‑hoc webhooks with a *minimal*, *standardizable* primitive that is easy to implement, cache, and reason about — especially when participants do **not** share infrastructure.
 
 ---
 
@@ -10,14 +12,14 @@ It is designed to replace bespoke “poll JSON until it changes” patterns with
 
 ```http
 GET /table?since_id=42
-Accept: application/stp+tsv; schema=endpoint_manifest; version=1
+Accept: text/sequence; charset=utf-8; schema=endpoint_manifest; version=1
 ```
 
 ```text
-Content-Type: application/stp+tsv; schema=endpoint_manifest; version=1
+Content-Type: text/sequence; charset=utf-8; schema=endpoint_manifest; version=1
 
-43\t2026-01-08T00:00:00Z\t+\tfhir_read\thttps://prov.com/fhir/read
-44\t2026-01-08T00:00:01Z\t+\tdirect_message\thttps://prov.com/direct
+43	2026-01-08T00:00:00Z	+	fhir_read	https://prov.com/fhir/read
+44	2026-01-08T00:00:01Z	+	direct_message	https://prov.com/direct
 ```
 
 Row format:
@@ -34,61 +36,76 @@ Row format:
 
 ## Why STP exists
 
-Many systems need to share or synchronize **state changes** (tables, mappings, approval lists, subscriptions, routing entries, etc.) without:
+Many systems need to share or synchronize **changing state** (tables, mappings, approval lists, subscriptions, routing entries, manifests, etc.) without:
 
 - building a bespoke “delta sync” API for every endpoint,
-- transferring the full dataset repeatedly,
-- relying on a shared broker or database,
+- transferring full datasets repeatedly,
+- relying on a shared broker, queue, or database,
 - losing updates during outages,
-- or sacrificing auditability.
+- or sacrificing auditability and replay.
 
-STP defines a simple, inspectable, cacheable convention for doing this over HTTP.
+**STP defines a tiny, inspectable, cacheable convention for doing this over HTTP.**
+
+It represents state as an **append-only change log** with monotonic sequence numbers, enabling:
+
+- **delta sync** (`since_id`)
+- **gap recovery** (replay from last seen SeqNo)
+- **idempotent processing**
+- **auditable ordering**
 
 ---
 
-## Why STP (vs JSON polling)
+## STP vs JSON polling, webhooks, and Kafka
 
-**JSON polling is expensive and ambiguous:**
-- forces full-state downloads or ad-hoc “since” logic
-- hard to audit (no canonical ordering)
+These patterns exist because **HTTP has no built‑in state‑notify primitive** — so systems invented their own.
+
+### JSON polling
+- often forces full-state downloads or bespoke “since” APIs
+- expensive and ambiguous
 - easy to lose updates during outages
-- encourages one-off schemas and libraries
+- hard to audit (no canonical ordering)
 
-**STP is minimal but complete:**
-- **Incremental replication:** `since_id=N` yields only new rows
-- **Auditable ordering:** monotonic `SeqNo` provides integrity and replay
-- **Gap recovery:** reconnect with last seen `SeqNo`
-- **Idempotent by design:** duplicates are harmless
-- **Composable:** works with long-poll, caches, CDNs, or any transport layer
-- **Easy to implement:** any web server + datastore can serve STP tables
+### Webhooks
+- “event-only” notifications without a durable authoritative log
+- brittle under retries, failures, and race conditions
+- requires bespoke signing, replay protection, and idempotency logic
 
----
+### Kafka / message buses
+- great for high-throughput streams inside one organization
+- assumes shared broker infrastructure and coordinated ops
+- not designed as a universal cross-org protocol
 
-## STP vs Kafka (and other message buses)
-
-Kafka, NATS, and similar systems are excellent for **high-throughput event streaming** inside a single organization or tightly coordinated environment. If you can run a broker cluster, they provide durability, ordering guarantees, and rich tooling.
-
-STP solves a different problem: **auditable incremental state transfer across independent systems using only HTTP**. It is designed for environments where participants:
-
-- do **not** share infrastructure,
-- cannot assume a common broker,
-- need **pull-based replay** (`since_id`) and idempotency,
-- want a protocol that works over the public internet with minimal dependencies.
-
-**In practice:** Kafka is a platform; STP is a protocol primitive.  
-You can use Kafka internally and expose STP externally, or export Kafka topics into STP tables.
+**STP provides a better common primitive:** durable state streams + lightweight advisory notifications, all over HTTP.
 
 ---
 
-## STP is not a pub/sub system
+## STP includes Notify: SURLs + NURLs
 
-STP does not provide topic routing, fanout, consumer groups, or broker coordination.
+STP defines two concepts:
 
-It provides a **durable change stream format** and a **sync primitive** that composes with:
-- CDNs and HTTP caches
-- long-poll / streaming responses
-- notify POSTs
-- queues or brokers (optional)
+- **SURL (State URL):** a URL that serves STP rows via HTTP GET.
+- **NURL (Notify URL):** an HTTP endpoint that accepts STP Notify POSTs.
+
+In real systems, polling alone isn’t enough. You also need a way to:
+
+- bootstrap relationships (“follow this table”),
+- signal updates (“something changed; re-GET”),
+- and advertise callback endpoints for later use.
+
+STP therefore includes a simple **Notify mechanism**: peers POST a `surl=...` and may include one or more event-specific callback NURLs.
+
+This pattern appears everywhere:
+
+- **bootstrap:** “follow this SURL, and here’s how to notify me back”
+- **fan-out:** “here’s my table; notify me if you decide to follow it”
+- **subscriptions:** “notify this endpoint when you publish new rows”
+- **relationship establishment:** manifests, trust negotiation, capability discovery
+- **changefeed graphs:** tables pointing to tables, forming distributed routing networks
+
+Because Notify supports **multiple event keys**, systems can expose distinct callback surfaces (e.g. `manifest_notify=`, `grant_notify=`) without inventing new protocols.
+
+**Result:** large distributed systems can be built from simple HTTP primitives:
+durable state streams (**SURLs**) + lightweight notification surfaces (**NURLs**).
 
 ---
 
@@ -97,17 +114,17 @@ It provides a **durable change stream format** and a **sync primitive** that com
 ### GET (stream rows)
 
 ```
-GET <table_url>?since_id=N
+GET <surl>?since_id=N
 ```
 
 Responses return TSV rows with:
-- strictly increasing `SeqNo` per stream
+- strictly increasing `SeqNo` per response
 - optional long-poll / streaming until timeout or idle
 
 **Required response header:**
 
 ```
-Content-Type: application/stp+tsv; schema=<schema_id>; version=<n>
+Content-Type: text/sequence; charset=utf-8; schema=<schema_id>; version=<n>
 ```
 
 ### Delta sync
@@ -117,24 +134,27 @@ Content-Type: application/stp+tsv; schema=<schema_id>; version=<n>
 
 If absent, treat as `since_id=0`.
 
-### Long-poll / streaming (recommended)
+### Long‑poll / streaming (recommended)
 
 Servers SHOULD stream rows until timeout (or idle), then close; clients reconnect using last seen `SeqNo`.
 
-### Notify (optional mechanism)
+### Notify
 
-Participants MAY expose **notify URLs** that peers can POST to in order to:
-- announce a **new table** the recipient should begin monitoring, or
-- signal that an existing table **has new rows**
+Participants MAY expose **Notify URLs (NURLs)** that peers can POST to announce a new or updated **State URL (SURL)**.
 
-```
-POST <notify_url>
+```http
+POST <nurl>
 Content-Type: application/x-www-form-urlencoded
 
-table=<STP_Table_URL>
+surl=<STP_State_URL>&<event_type>=<NURL>&...
 ```
 
-Notify POSTs may be sent repeatedly and must be treated as idempotent.
+- `surl` MUST be present exactly once and MUST be a valid STP State URL.
+- Additional parameters MAY advertise event-specific callback NURLs.
+  - Each key is an `event_type` token matching: `[a-z][a-z0-9_]*`
+  - Each value MUST be a NURL.
+- Unknown parameters MUST be ignored.
+- Notify POSTs are advisory and idempotent; recipients MUST GET `surl` as the authoritative source of state.
 
 ---
 
